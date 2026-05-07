@@ -1,145 +1,111 @@
-import json
-from lexer import tokenize, Token
-from typing import List, Optional, Any, Dict
-
-class ParseError(Exception):
-    pass
+from lexer import tokenize
 
 class Parser:
-    def __init__(self, tokens: List[Token]):
+    def __init__(self, tokens):
         self.tokens = tokens
         self.pos = 0
 
-    def current(self) -> Token:
-        return self.tokens[self.pos]
-
-    def peek(self, offset=1) -> Token:
-        idx = self.pos + offset
-        if idx < len(self.tokens):
-            return self.tokens[idx]
-        return self.tokens[-1]
-
-    def consume(self, expected_kind: Optional[str] = None) -> Token:
+    def current(self): return self.tokens[self.pos]
+    
+    def consume(self, expected=None):
         tok = self.current()
-        if expected_kind and tok.kind != expected_kind:
-            raise ParseError(
-                f"Línea {tok.line}: Se esperaba '{expected_kind}', "
-                f"se encontró '{tok.kind}' ({tok.value!r})"
-            )
+        if expected and tok.kind != expected:
+            raise Exception(f"Error sintáctico: Se esperaba {expected}, se obtuvo {tok.kind}")
         self.pos += 1
         return tok
 
-    def match(self, *kinds) -> bool:
+    def match(self, *kinds): 
         return self.current().kind in kinds
 
-    def parse_program(self) -> Dict:
-        self.consume('KW_INICIO')
-        body = self.parse_stmt_list()
-        self.consume('KW_FIN')
-        self.consume('EOF')
+    def parse_program(self):
+        body = []
+        while not self.match('EOF'):
+            body.append(self.parse_decl())
         return {"type": "Program", "body": body}
 
-    def parse_stmt_list(self) -> List[Dict]:
+    def parse_decl(self):
+        if self.match('KW_INT', 'KW_FLOAT', 'KW_VOID'):
+            var_type = self.consume().value
+            name = self.consume('ID').value
+            if self.match('OP_ASSIGN', 'SEMI'):
+                return self.parse_var_decl_rest(var_type, name)
+            elif self.match('LPAREN'):
+                return self.parse_func_decl(var_type, name)
+        raise Exception(f"Declaración inválida: {self.current().value}")
+
+    def parse_var_decl_rest(self, var_type, name):
+        val = None
+        if self.match('OP_ASSIGN'):
+            self.consume()
+            val = self.parse_expr()
+        self.consume('SEMI')
+        return {"type": "VarDecl", "var_type": var_type, "name": name, "value": val}
+
+    def parse_func_decl(self, ret_type, name):
+        self.consume('LPAREN')
+        params = []
+        if not self.match('RPAREN'):
+            ptype = self.consume().value
+            pname = self.consume('ID').value
+            params.append({"type": ptype, "name": pname})
+        self.consume('RPAREN')
+        body = self.parse_block()
+        return {"type": "FuncDecl", "ret_type": ret_type, "name": name, "params": params, "body": body}
+
+    def parse_block(self):
+        self.consume('LBRACE')
         stmts = []
-        stop = {'KW_FIN', 'KW_FINSI', 'KW_FINFUNCION', 'EOF'}
-        while not self.match(*stop):
+        while not self.match('RBRACE', 'EOF'):
             stmts.append(self.parse_stmt())
-        return stmts
+        self.consume('RBRACE')
+        return {"type": "Block", "body": stmts}
 
-    def parse_stmt(self) -> Dict:
-        tok = self.current()
-        if tok.kind == 'KW_ESCRIBIR':
-            return self.parse_print()
-        elif tok.kind == 'KW_SI':
-            return self.parse_if()
-        elif tok.kind == 'ID':
-            return self.parse_assign()
-        else:
-            raise ParseError(f"Línea {tok.line}: Sentencia inesperada: {tok.value!r}")
+    def parse_stmt(self):
+        if self.match('LBRACE'): 
+            return self.parse_block()
+        if self.match('KW_INT', 'KW_FLOAT'):
+            t = self.consume().value
+            n = self.consume('ID').value
+            return self.parse_var_decl_rest(t, n)
+        if self.match('KW_ESCRIBIR'):
+            self.consume()
+            self.consume('LPAREN')
+            e = self.parse_expr()
+            self.consume('RPAREN')
+            self.consume('SEMI')
+            return {"type": "Print", "expr": e}
+        if self.match('ID'):
+            n = self.consume('ID').value
+            self.consume('OP_ASSIGN')
+            e = self.parse_expr()
+            self.consume('SEMI')
+            return {"type": "Assign", "name": n, "value": e}
+        raise Exception(f"Sentencia inválida: {self.current().value}")
 
-    def parse_assign(self) -> Dict:
-        name = self.consume('ID').value
-        self.consume('OP_ASSIGN')
-        value = self.parse_expr()
-        return {"type": "Assign", "name": name, "value": value}
-
-    def parse_print(self) -> Dict:
-        self.consume('KW_ESCRIBIR')
-        self.consume('LPAREN')
-        expr = self.parse_expr()
-        self.consume('RPAREN')
-        return {"type": "Print", "expr": expr}
-
-    def parse_if(self) -> Dict:
-        self.consume('KW_SI')
-        self.consume('LPAREN')
-        condition = self.parse_cond()
-        self.consume('RPAREN')
-        self.consume('KW_ENTONCES')
-        body = self.parse_stmt_list()
-        self.consume('KW_FINSI')
-        return {"type": "If", "condition": condition, "body": body}
-
-    def parse_cond(self) -> Dict:
-        left = self.parse_expr()
-        rel_ops = {'OP_GT', 'OP_LT', 'OP_GTE', 'OP_LTE', 'OP_EQ'}
-        if not self.match(*rel_ops):
-            raise ParseError(f"Línea {self.current().line}: Operador relacional esperado")
-        op = self.consume().value
-        right = self.parse_expr()
-        return {"type": "BinOp", "op": op, "left": left, "right": right}
-
-    def parse_expr(self) -> Dict:
-        node = self.parse_term()
-        while self.match('OP_PLUS', 'OP_MINUS'):
+    def parse_expr(self):
+        left = self.parse_term()
+        while self.match('OP_PLUS'):
             op = self.consume().value
             right = self.parse_term()
-            node = {"type": "BinOp", "op": op, "left": node, "right": right}
-        return node
+            left = {"type": "BinOp", "op": op, "left": left, "right": right}
+        return left
 
-    def parse_term(self) -> Dict:
-        node = self.parse_factor()
-        while self.match('OP_MULT', 'OP_DIV'):
+    def parse_term(self):
+        left = self.parse_factor()
+        while self.match('OP_MULT'):
             op = self.consume().value
             right = self.parse_factor()
-            node = {"type": "BinOp", "op": op, "left": node, "right": right}
-        return node
+            left = {"type": "BinOp", "op": op, "left": left, "right": right}
+        return left
 
-    def parse_factor(self) -> Dict:
-        tok = self.current()
-        if tok.kind == 'NUM':
-            self.consume()
-            return {"type": "Num", "value": int(tok.value)}
-        elif tok.kind == 'ID':
-            self.consume()
-            return {"type": "Var", "name": tok.value}
-        elif tok.kind == 'LPAREN':
-            self.consume('LPAREN')
-            node = self.parse_expr()
-            self.consume('RPAREN')
-            return node
-        else:
-            raise ParseError(f"Línea {tok.line}: Factor inesperado: {tok.value!r}")
+    def parse_factor(self):
+        if self.match('NUM'): 
+            return {"type": "Num", "value": int(self.consume().value)}
+        if self.match('FLOAT'): 
+            return {"type": "NumFloat", "value": float(self.consume().value)}
+        if self.match('ID'): 
+            return {"type": "Var", "name": self.consume().value}
+        raise Exception("Factor inválido")
 
-def parse(source: str) -> Dict:
-    tokens = tokenize(source)
-    parser = Parser(tokens)
-    return parser.parse_program()
-
-PROGRAMA = """\
-inicio
-    a = 10
-    b = 20
-    c = a + b * 2
-    si (c > 30) entonces
-        escribir(c)
-        d = c - 10
-    finsi
-    escribir(d)
-fin
-"""
-
-if __name__ == '__main__':
-    ast = parse(PROGRAMA)
-    print("AST (JSON):")
-    print(json.dumps(ast, indent=2, ensure_ascii=False))
+def parse(source):
+    return Parser(tokenize(source)).parse_program()
