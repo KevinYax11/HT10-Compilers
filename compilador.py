@@ -1,3 +1,4 @@
+import json
 from parser import parse
 from semantic import SemanticAnalyzer
 
@@ -16,5 +17,9 @@ void test(int a) {
 
 if __name__ == '__main__':
     ast = parse(CODIGO_PRUEBA)
+    
+    print("\n--- AST PARA JSON CRACK ---")
+    print(json.dumps(ast, indent=2, ensure_ascii=False))
+    
     analyzer = SemanticAnalyzer()
     analyzer.analyze(ast)
